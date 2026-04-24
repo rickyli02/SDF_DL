@@ -1,0 +1,52 @@
+{
+  "config": "config_RF/config_RF_1.json",
+  "source_root": "sample_checkpoints/sample_checkpoints_RF",
+  "output_root": "sample_checkpoints/python",
+  "converted_trials": [
+    {
+      "trial": "RF_1_Trial_0",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_0/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_0/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_1",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_1/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_1/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_2",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_2/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_2/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_3",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_3/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_3/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_4",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_4/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_4/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_5",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_5/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_5/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_6",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_6/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_6/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_7",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_7/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_7/model-000000.pt"
+    },
+    {
+      "trial": "RF_1_Trial_8",
+      "source_checkpoint": "sample_checkpoints/sample_checkpoints_RF/RF_1_Trial_8/model-best",
+      "output_checkpoint": "sample_checkpoints/python/RF_1_Trial_8/model-000000.pt"
+    }
+  ]
+}
