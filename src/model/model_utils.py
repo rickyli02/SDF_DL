@@ -1,38 +1,5 @@
 import numpy as np
-import torch
 import torch.nn as nn
-
-
-def create_rnn_cell(cell_type, num_units, num_layers=1, dropout=0.0):
-    """Return a torch.nn.RNNBase module for the given cell type.
-
-    Args:
-        cell_type: 'rnn', 'gru', or 'lstm'
-        num_units: list of hidden sizes, one per layer
-        num_layers: must equal len(num_units)
-        dropout: dropout probability between layers (applied if num_layers > 1)
-
-    Returns:
-        nn.RNN / nn.GRU / nn.LSTM with batch_first=True
-    """
-    assert len(num_units) == num_layers, "num_units length must match num_layers"
-    if num_layers > 1 and len(set(num_units)) > 1:
-        raise ValueError("PyTorch stacked RNNs require uniform hidden size across layers")
-
-    hidden_size = num_units[0]
-    inter_dropout = dropout if num_layers > 1 else 0.0
-
-    cls = {"rnn": nn.RNN, "gru": nn.GRU, "lstm": nn.LSTM}.get(cell_type)
-    if cls is None:
-        raise ValueError(f"Cell type '{cell_type}' not supported")
-
-    return cls(
-        input_size=0,  # set by caller via build_rnn()
-        hidden_size=hidden_size,
-        num_layers=num_layers,
-        dropout=inter_dropout,
-        batch_first=True,
-    )
 
 
 def build_rnn(cell_type, input_size, num_units, num_layers=1, dropout=0.0):

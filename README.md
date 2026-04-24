@@ -1,28 +1,25 @@
-# Deep Learning Asset Pricing Main Code for Training
+# Deep Learning Asset Pricing — SDF_DL
 
 ## Repo Map
-- `run.py`: trains the main SDF/GAN model.
+- `run.py`: trains the main SDF/GAN model (PyTorch).
 - `run_RtnFcst_ensembles.py`: trains the return-forecasting network on the `R * F` data generated from the SDF output.
 - `create_RF_data.py`: builds the `datasets/RF/*.npz` files consumed by the return-forecasting stage.
 - `model_GAN.ipynb`: analysis notebook used between and after the training stages.
+- `capture_golden.py`: saves `.npy` golden regression baselines from a trained PyTorch ensemble.
 - `config/config.json`: main SDF training config.
 - `config_RF/config_RF_1.json`: return-forecast training config for task 1.
 - `src/data/data_layer.py`: loads `.npz` datasets into memory and handles macro feature normalization.
-- `src/model/`: model definitions and training loops.
-
-## Runtime Notes
-- The original codebase targeted TensorFlow 1.12 / Python 3.6.
-- This repo has been adjusted to run in TensorFlow 2.15 compatibility mode (`tf.compat.v1`) so it can be used on a current Python 3.11 environment.
-- The scripts still expect the original dataset layout from the paper codebase.
+- `src/model/`: PyTorch model definitions and training loops.
+- `tf_reference/`: frozen copy of the original TensorFlow source (reference only — not used at runtime).
 
 ## Local Setup
-These steps are intended for this repo on macOS Apple Silicon and also work with standard `tensorflow==2.15.x` on non-Apple-Silicon machines.
+Requires Python 3.11+ and PyTorch 2.3+. Apple Silicon (MPS) and CUDA are both supported.
 
 ```bash
-/usr/local/bin/python3.11 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
 ## Data Layout
@@ -37,18 +34,23 @@ datasets/macro/macro_valid.npz
 datasets/macro/macro_test.npz
 ```
 
-The scripts now fail fast with a clear error if these files are missing.
+Scripts fail fast with a clear error if these files are missing.
 
 Datasets: [Google Drive](https://drive.google.com/drive/folders/1TrYzMUA_xLID5-gXOy_as8sH2ahLwz-l?usp=sharing)
 
 ## End-to-End Flow
+
 ### Step 1: Train the SDF network
+Runs 9 trials (Task_1_Trial_0 … Task_1_Trial_8) sequentially and saves `.pt` checkpoints under `output/`.
+
 ```bash
-python run.py --config=config/config.json --logdir=output --saveBestFreq=128 --printOnConsole=True --saveLog=True --ignoreEpoch=32
+python run.py --config config/config.json --logdir output
 ```
 
-### Step 2: Run the first 8 cells of `model_GAN.ipynb`
-This produces the SDF outputs used in the next stage.
+Optional flags: `--seed 42`, `--num-trials 9`, `--saveBestFreq 128`, `--printOnConsole`.
+
+### Step 2: Analyse SDF outputs (notebook stage 1)
+Open `model_GAN.ipynb` and run through the **Model Performance** section (cells up to and including the Sharpe print). This produces `output/sdf_normalized_ensemble.npy`.
 
 ### Step 3: Generate the `R * F` datasets
 ```bash
@@ -60,5 +62,17 @@ python create_RF_data.py
 python run_RtnFcst_ensembles.py --config config_RF --logdir output_RF --task_id 1 --trial_id 1
 ```
 
-### Step 5: Run the remaining cells of `model_GAN.ipynb`
-This computes the EV and XS-R2 pricing results.
+### Step 5: Analyse predictive performance (notebook stage 2)
+Run the remaining cells of `model_GAN.ipynb` to compute EV and XS-R² pricing results.
+
+## Regression Tests
+```bash
+pytest tests/ -v
+```
+
+Golden-value regression tests (`tests/test_golden.py`) require trained checkpoints and pre-saved baselines. To create baselines after training:
+
+```bash
+python capture_golden.py --logdir output
+pytest tests/test_golden.py -v
+```
