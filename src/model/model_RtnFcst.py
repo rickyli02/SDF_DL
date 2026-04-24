@@ -1,236 +1,198 @@
-import copy
 import os
 import time
-import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib import cm
-from mpl_toolkits.mplot3d import Axes3D
-from tensorflow.core.framework import summary_pb2
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
 
 from .model_base import ModelBase
-from .model_utils import getFactor
-from .model_utils import calculateStatistics
-from src.tf_compat import Dense
-from src.tf_compat import tf
-from src.utils import deco_print
-from src.utils import sharpe
-from src.utils import construct_long_short_portfolio
+from .model_utils import getFactor, calculateStatistics
+from src.utils import deco_print, sharpe, construct_long_short_portfolio
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    _TB_AVAILABLE = True
+except ImportError:
+    _TB_AVAILABLE = False
+
 
 class FeedForwardModelWithNA_Return_Ensembled:
-	def __init__(self, logdirs, model_params, mode, force_var_reuse=False, global_step=None):
-		self._logdirs = logdirs
-		self._model = FeedForwardModelWithNA_Return(model_params, mode, force_var_reuse=force_var_reuse, global_step=global_step)
+    """Ensemble wrapper for the return-forecasting beta network."""
 
-	def getPrediction(self, sess, dl):
-		pred = []
-		for logdir in self._logdirs:
-			self._model.loadSavedModel(sess, logdir)
-			pred.append(self._model.getPrediction(sess, dl))
-		return np.array(pred).mean(axis=0)
+    def __init__(self, logdirs, model_params, mode, device=None):
+        self._logdirs = logdirs
+        self._model = FeedForwardModelWithNA_Return(model_params, mode, device=device)
 
-	def getSDFFactor(self, sess, dl, normalized=False, norm=None):
-		beta = self.getPrediction(sess, dl)
-		F = getFactor(beta, dl, normalized=normalized, norm=norm)
-		return F
+    def getPrediction(self, dl):
+        preds = []
+        for logdir in self._logdirs:
+            self._model.load(logdir)
+            preds.append(self._model.getPrediction(dl))
+        return np.array(preds).mean(axis=0)
 
-	def calculateStatistics(self, sess, dl):
-		w = self.getPrediction(sess, dl)
-		return calculateStatistics(w, dl)
+    def getSDFFactor(self, dl, normalized=False, norm=None):
+        beta = self.getPrediction(dl)
+        return getFactor(beta, dl, normalized=normalized, norm=norm)
 
-	def evaluate_sharpe(self, sess, dl):
-		R_pred = self.getPrediction(sess, dl)
-		for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
-			portfolio = construct_long_short_portfolio(R_pred, R[mask], mask)
-		return sharpe(portfolio)
+    def calculateStatistics(self, dl):
+        return calculateStatistics(self.getPrediction(dl), dl)
+
+    def evaluate_sharpe(self, dl):
+        R_pred = self.getPrediction(dl)
+        for _, (_, _, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
+            portfolio = construct_long_short_portfolio(R_pred, R[mask], mask)
+        return sharpe(portfolio)
+
 
 class FeedForwardModelWithNA_Return(ModelBase):
-	def __init__(self, model_params, mode, force_var_reuse=False, global_step=None):
-		super(FeedForwardModelWithNA_Return, self).__init__(model_params, mode, global_step)
-		self._force_var_reuse = force_var_reuse
-		self._macro_feature_dim = self.model_params['macro_feature_dim']
-		self._individual_feature_dim = self.model_params['individual_feature_dim']
+    """Return-forecasting beta network (PyTorch).
 
-		self._I_macro_placeholder = tf.placeholder(dtype=tf.float32, shape=[None, self._macro_feature_dim], name='macroFeaturePlaceholder')
-		self._I_placeholder = tf.placeholder(dtype=tf.float32, shape=[None, None, self._individual_feature_dim], name='individualFeaturePlaceholder')
-		self._R_placeholder = tf.placeholder(dtype=tf.float32, shape=[None, None], name='returnPlaceholder')
-		self._mask_placeholder = tf.placeholder(dtype=tf.bool, shape=[None, None], name='maskPlaceholder')
-		self._dropout_placeholder = tf.placeholder_with_default(1.0, shape=[], name='Dropout')
+    Predicts next-period return for each (firm, time) pair via:
+      [char_features ‖ macro_features] → FF layers → scalar prediction
+    """
 
-		if self.model_params['weighted_loss']:
-			self._loss_weight = tf.placeholder(dtype=tf.float32, shape=[None, None], name='weightPlaceholder')
+    def __init__(self, model_params, mode, device=None):
+        super().__init__(model_params, mode)
 
-		with tf.variable_scope(name_or_scope='Model_Layer', reuse=self._force_var_reuse):
-			self._build_forward_pass_graph()
-		if self._mode == 'train':
-			self._train_model_op = self._build_train_op(self._loss, scope='Model_Layer')
+        if device is None:
+            if torch.backends.mps.is_available():
+                device = torch.device("mps")
+            elif torch.cuda.is_available():
+                device = torch.device("cuda")
+            else:
+                device = torch.device("cpu")
+        self._device = torch.device(device) if isinstance(device, str) else device
 
-	def _build_forward_pass_graph(self):
-		with tf.variable_scope('NN_Layer'):
-			NSize = tf.shape(self._R_placeholder)[1]
-			I_macro_tile = tf.tile(tf.expand_dims(self._I_macro_placeholder, axis=1), [1,NSize,1])
-			I_macro_masked = tf.boolean_mask(I_macro_tile, mask=self._mask_placeholder)
-			I_masked = tf.boolean_mask(self._I_placeholder, mask=self._mask_placeholder)
-			I_concat = tf.concat([I_masked, I_macro_masked], axis=1)
-			R_masked = tf.boolean_mask(self._R_placeholder, mask=self._mask_placeholder)
+        self._macro_dim = model_params["macro_feature_dim"]
+        self._char_dim = model_params["individual_feature_dim"]
+        self._dropout_rate = 1.0 - float(model_params.get("dropout", 1.0))
 
-			h_l = I_concat
-			for l in range(self.model_params['num_layers']):
-				with tf.variable_scope('dense_layer_%d' %l):
-					layer_l = Dense(units=self.model_params['hidden_dim'][l], activation=tf.nn.relu)
-					h_l = layer_l(h_l)
-					h_l = tf.nn.dropout(h_l, self._dropout_placeholder)
+        layers, in_size = [], self._char_dim + self._macro_dim
+        for h in model_params["hidden_dim"]:
+            layers.append(nn.Linear(in_size, h))
+            in_size = h
+        self._ff = nn.ModuleList(layers)
+        self._output = nn.Linear(in_size, 1)
 
-			with tf.variable_scope('last_dense_layer'):
-				layer = Dense(units=1)
-				R_pred = layer(h_l)
-				self._R_pred = tf.reshape(R_pred, shape=[-1])
+        self.to(self._device)
 
-		if self.model_params['weighted_loss']:
-			loss_weight_masked = tf.boolean_mask(self._loss_weight, mask=self._mask_placeholder)
-			loss_weight_masked /= tf.reduce_sum(loss_weight_masked) # normalize weight
-			self._loss = tf.reduce_sum(tf.square(R_masked - self._R_pred) * loss_weight_masked)
-		else:
-			self._loss = tf.reduce_mean(tf.square(R_masked - self._R_pred))
+    def _t(self, arr):
+        if isinstance(arr, torch.Tensor):
+            return arr.to(dtype=torch.float32, device=self._device)
+        return torch.tensor(arr, dtype=torch.float32, device=self._device)
 
-	def train(self, sess, dl, dl_valid, logdir, loss_weight=None, loss_weight_valid=None, 
-			dl_test=None, loss_weight_test=None, 
-			printOnConsole=True, printFreq=128, saveLog=True):
-		saver = tf.train.Saver(max_to_keep=100)
-		if saveLog:
-			sw = tf.summary.FileWriter(logdir, sess.graph)
+    def _to_bool(self, arr):
+        if isinstance(arr, torch.Tensor):
+            return arr.to(dtype=torch.bool, device=self._device)
+        return torch.tensor(arr, dtype=torch.bool, device=self._device)
 
-		best_valid_loss = float('inf')
-		sharpe_train = []
-		sharpe_valid = []
-		### evaluate test data
-		evaluate_test_data = False
-		if dl_test is not None:
-			evaluate_test_data = True
-			sharpe_test = []
+    def forward(self, I_macro, I, R, mask):
+        I_macro = self._t(I_macro)
+        I = self._t(I)
+        mask = self._to_bool(mask)
 
-		time_start = time.time()
-		for epoch in range(self.model_params['num_epochs']):
-			for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=self.model_params['sub_epoch'])):
-				fetches = [self._train_model_op]
-				feed_dict = {self._I_macro_placeholder:I_macro,
-							self._I_placeholder:I,
-							self._R_placeholder:R,
-							self._mask_placeholder:mask,
-							self._dropout_placeholder:self.model_params['dropout']}
-				if self.model_params['weighted_loss']:
-					feed_dict[self._loss_weight] = loss_weight
-				sess.run(fetches=fetches, feed_dict=feed_dict)
+        T, N, _ = I.shape
+        macro_exp = I_macro.unsqueeze(1).expand(T, N, -1)
+        concat = torch.cat([I[mask], macro_exp[mask]], dim=1)
 
-			### evaluate train loss / sharpe
-			train_epoch_loss = self.evaluate_loss(sess, dl, loss_weight)
-			train_epoch_sharpe = self.evaluate_sharpe(sess, dl)
-			sharpe_train.append(train_epoch_sharpe)
+        h = concat
+        for layer in self._ff:
+            h = F.relu(layer(h))
+            if self.training:
+                h = F.dropout(h, p=self._dropout_rate)
+        return self._output(h).squeeze(-1)  # (num_valid,)
 
-			### evaluate valid loss / sharpe
-			valid_epoch_loss = self.evaluate_loss(sess, dl_valid, loss_weight_valid)
-			valid_epoch_sharpe = self.evaluate_sharpe(sess, dl_valid)
-			sharpe_valid.append(valid_epoch_sharpe)
+    def _mse_loss(self, R_pred, R, mask, loss_weight=None):
+        R_valid = self._t(R)[mask]
+        if loss_weight is not None:
+            lw = self._t(loss_weight)[mask]
+            lw = lw / lw.sum().clamp(min=1e-8)
+            return ((R_valid - R_pred).pow(2) * lw).sum()
+        return (R_valid - R_pred).pow(2).mean()
 
-			### evaluate test loss / sharpe
-			if evaluate_test_data:
-				test_epoch_loss = self.evaluate_loss(sess, dl_test, loss_weight_test)
-				test_epoch_sharpe = self.evaluate_sharpe(sess, dl_test)
-				sharpe_test.append(test_epoch_sharpe)
+    def train_model(self, dl, dl_valid, logdir, loss_weight=None, loss_weight_valid=None,
+                    dl_test=None, loss_weight_test=None,
+                    printOnConsole=True, printFreq=128, saveLog=True):
+        p = self._model_params
+        os.makedirs(logdir, exist_ok=True)
+        sw = SummaryWriter(logdir) if (saveLog and _TB_AVAILABLE) else None
 
-			### print loss / sharpe
-			if printOnConsole and epoch % printFreq == 0:
-				print('\n\n')
-				deco_print('Doing epoch %d' %epoch)
-				if evaluate_test_data:
-					deco_print('Epoch %d train/valid/test loss: %0.4f/%0.4f/%0.4f' %(epoch, train_epoch_loss, valid_epoch_loss, test_epoch_loss))
-					deco_print('Epoch %d train/valid/test sharpe: %0.4f/%0.4f/%0.4f' %(epoch, train_epoch_sharpe, valid_epoch_sharpe, test_epoch_sharpe))
-				else:
-					deco_print('Epoch %d train/valid loss: %0.4f/%0.4f' %(epoch, train_epoch_loss, valid_epoch_loss))
-					deco_print('Epoch %d train/valid sharpe: %0.4f/%0.4f' %(epoch, train_epoch_sharpe, valid_epoch_sharpe))
-			if saveLog:
-				value_loss_train = summary_pb2.Summary.Value(tag='Train_epoch_loss', simple_value=train_epoch_loss)
-				value_loss_valid = summary_pb2.Summary.Value(tag='Valid_epoch_loss', simple_value=valid_epoch_loss)
-				value_sharpe_train = summary_pb2.Summary.Value(tag='Train_epoch_sharpe', simple_value=train_epoch_sharpe)
-				value_sharpe_valid = summary_pb2.Summary.Value(tag='Valid_epoch_sharpe', simple_value=valid_epoch_sharpe)
-				if evaluate_test_data:
-					value_loss_test = summary_pb2.Summary.Value(tag='Test_epoch_loss', simple_value=test_epoch_loss)
-					value_sharpe_test = summary_pb2.Summary.Value(tag='Test_epoch_sharpe', simple_value=test_epoch_sharpe)
-					summary = summary_pb2.Summary(value=[value_loss_train, value_loss_valid, value_loss_test, value_sharpe_train, value_sharpe_valid, value_sharpe_test])
-				else:
-					summary = summary_pb2.Summary(value=[value_loss_train, value_loss_valid, value_sharpe_train, value_sharpe_valid])
-				sw.add_summary(summary, global_step=epoch)
-				sw.flush()
+        optimizer = self.build_optimizer()
+        scheduler = self.build_scheduler(optimizer)
 
-			### save epoch
-			if valid_epoch_loss < best_valid_loss:
-				best_valid_loss = valid_epoch_loss
-				if printOnConsole and epoch % printFreq == 0:
-					deco_print('Saving current best checkpoint')
-				saver.save(sess, save_path=os.path.join(logdir, 'model-best'))
+        best_valid_loss = float("inf")
+        sharpe_train, sharpe_valid, sharpe_test = [], [], []
+        has_test = dl_test is not None
 
-			### time
-			if printOnConsole and epoch % printFreq == 0:
-				time_elapse = time.time() - time_start
-				time_est = time_elapse / (epoch+1) * self.model_params['num_epochs']
-				deco_print('Epoch %d Elapse/Estimate: %0.2fs/%0.2fs' %(epoch, time_elapse, time_est))
-		if evaluate_test_data:
-			return sharpe_train, sharpe_valid, sharpe_test
-		else:
-			return sharpe_train, sharpe_valid
+        time_start = time.time()
+        for epoch in range(p["num_epochs"]):
+            self.train()
+            for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=p["sub_epoch"])):
+                mask_t = self._to_bool(mask)
+                R_pred = self.forward(I_macro, I, R, mask)
+                loss = self._mse_loss(R_pred, R, mask_t, loss_weight)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            if scheduler:
+                scheduler.step()
+            self.global_step += 1
 
-	def evaluate_loss(self, sess, dl, loss_weight=None):
-		for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
-			feed_dict = {self._I_macro_placeholder:I_macro,
-						self._I_placeholder:I,
-						self._R_placeholder:R,
-						self._mask_placeholder:mask,
-						self._dropout_placeholder:1.0}
-			if self.model_params['weighted_loss']:
-				feed_dict[self._loss_weight] = loss_weight
-			loss, = sess.run([self._loss], feed_dict=feed_dict)
-		return loss
+            tr_loss = self._eval_loss(dl, loss_weight)
+            vl_loss = self._eval_loss(dl_valid, loss_weight_valid)
+            tr_sr = self.evaluate_sharpe(dl)
+            vl_sr = self.evaluate_sharpe(dl_valid)
+            sharpe_train.append(tr_sr)
+            sharpe_valid.append(vl_sr)
 
-	def evaluate_sharpe(self, sess, dl):
-		R_pred = self.getPrediction(sess, dl)
-		for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
-			portfolio = construct_long_short_portfolio(R_pred, R[mask], mask) # equally weighted
-		return sharpe(portfolio)
+            te_loss = te_sr = None
+            if has_test:
+                te_loss = self._eval_loss(dl_test, loss_weight_test)
+                te_sr = self.evaluate_sharpe(dl_test)
+                sharpe_test.append(te_sr)
 
-	def getPrediction(self, sess, dl):
-		for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
-			feed_dict = {self._I_macro_placeholder:I_macro,
-						self._I_placeholder:I,
-						self._R_placeholder:R,
-						self._mask_placeholder:mask,
-						self._dropout_placeholder:1.0}
-			R_pred, = sess.run(fetches=[self._R_pred], feed_dict=feed_dict)
-		return R_pred
+            if printOnConsole and epoch % printFreq == 0:
+                if has_test:
+                    deco_print(f"Epoch {epoch} loss {tr_loss:.4f}/{vl_loss:.4f}/{te_loss:.4f}  "
+                               f"sharpe {tr_sr:.4f}/{vl_sr:.4f}/{te_sr:.4f}")
+                else:
+                    deco_print(f"Epoch {epoch} loss {tr_loss:.4f}/{vl_loss:.4f}  "
+                               f"sharpe {tr_sr:.4f}/{vl_sr:.4f}")
+                elapsed = time.time() - time_start
+                deco_print(f"Epoch {epoch} {elapsed:.1f}s / {elapsed/(epoch+1)*p['num_epochs']:.1f}s est")
 
-	def calculateStatistics(self, sess, dl):
-		w = self.getPrediction(sess, dl)
-		return calculateStatistics(w, dl)
+            if sw:
+                sw.add_scalars("Loss", {"train": tr_loss, "valid": vl_loss}, epoch)
+                sw.add_scalars("Sharpe", {"train": tr_sr, "valid": vl_sr}, epoch)
 
-	def _saveIndividualFeatureImportance(self, sess, dl, logdir, delta=1e-6):
-		R_pred = self.getPrediction(sess, dl)
-		gradients = np.zeros(shape=(self._individual_feature_dim))
+            if vl_loss < best_valid_loss:
+                best_valid_loss = vl_loss
+                self.save(logdir, epoch)
 
-		time_start = time.time()
-		for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
-			for idx in range(self._individual_feature_dim):
-				I_copy = copy.deepcopy(I)
-				I_copy[mask, idx] += delta
+        if sw:
+            sw.close()
 
-				feed_dict = {self._I_macro_placeholder:I_macro,
-							self._I_placeholder:I_copy,
-							self._R_placeholder:R,
-							self._mask_placeholder:mask,
-							self._dropout_placeholder:1.0}
-				R_pred_idx, = sess.run(fetches=[self._R_pred], feed_dict=feed_dict)
-				gradients[idx] = np.mean(np.absolute(R_pred_idx - R_pred))
-				time_last = time.time() - time_start
-				time_est = time_last / (idx+1) * self._individual_feature_dim
-				deco_print('Calculating VI for %s\tElapse / Estimate: %.2fs / %.2fs' %(dl.getIndividualFeatureByIdx(idx), time_last, time_est))
+        return (sharpe_train, sharpe_valid, sharpe_test) if has_test else (sharpe_train, sharpe_valid)
 
-		gradients /= delta
-		deco_print('Saving output in %s' %os.path.join(logdir, 'ave_absolute_gradient.npy'))
-		np.save(os.path.join(logdir, 'ave_absolute_gradient.npy'), gradients)
+    def _eval_loss(self, dl, loss_weight):
+        self.eval()
+        with torch.no_grad():
+            for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
+                mask_t = self._to_bool(mask)
+                R_pred = self.forward(I_macro, I, R, mask)
+                return self._mse_loss(R_pred, R, mask_t, loss_weight).item()
+
+    def getPrediction(self, dl):
+        self.eval()
+        with torch.no_grad():
+            for _, (I_macro, I, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
+                return self.forward(I_macro, I, R, mask).cpu().numpy()
+
+    def evaluate_sharpe(self, dl):
+        R_pred = self.getPrediction(dl)
+        for _, (_, _, R, mask) in enumerate(dl.iterateOneEpoch(subEpoch=False)):
+            portfolio = construct_long_short_portfolio(R_pred, R[mask], mask)
+        return sharpe(portfolio)
+
+    def calculateStatistics(self, dl):
+        return calculateStatistics(self.getPrediction(dl), dl)
