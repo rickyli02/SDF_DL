@@ -1,111 +1,76 @@
 import abc
-import six
+import glob
+import os
 
-from src.tf_compat import tf
+import torch
+import torch.nn as nn
+
 from src.utils import deco_print
 
-six.add_metaclass(abc.ABCMeta)
-class ModelBase:
-	"""Abstract class that defines a model. 
-	"""
-	def __init__(self, model_params, mode, global_step=None):
-		"""Initialize a model. 
 
-		Arguments: 
-			model_params: Parameters describing a model. 
-			mode: Mode. 
-			global_step: Global step. 
-		"""
-		self._model_params = model_params
-		self._mode = mode
-		self._global_step = global_step if global_step is not None else tf.train.get_or_create_global_step()
+class ModelBase(nn.Module, abc.ABC):
+    """Abstract base class for all models."""
 
-	@abc.abstractmethod
-	def _build_forward_pass_graph(self):
-		"""Abstract method that describes how forward pass graph is constructed. 
-		"""
-		return
+    def __init__(self, model_params, mode):
+        super().__init__()
+        self._model_params = model_params
+        self._mode = mode
+        self.global_step = 0
 
-	def _build_train_op(self, loss, scope, loss_factor=1.0):
-		"""Construct a training op. 
+    @abc.abstractmethod
+    def forward(self, I_macro, I, R, mask):
+        """Forward pass. All tensors on the model's device."""
 
-		Arguments:
-			loss: Scalar 'Tensor'
-		"""
+    def build_optimizer(self):
+        optimizer_name = self._model_params.get("optimizer", "Adam")
+        lr = self._model_params["learning_rate"]
 
-		### Trainable variables
-		deco_print('Trainable variables (scope=%s)' %scope)
-		total_params = 0
-		trainable_variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope=scope)
-		for var in trainable_variables:
-			var_params = 1
-			for dim in var.get_shape():
-				var_params *= dim.value
-			total_params += var_params
-			print('Name: {} and shape: {}'.format(var.name, var.get_shape()))
-		deco_print('Number of parameters: %d' %total_params)
+        if optimizer_name == "Momentum":
+            return torch.optim.SGD(self.parameters(), lr=lr, momentum=0.9)
+        elif optimizer_name == "AdaDelta":
+            return torch.optim.Adadelta(self.parameters(), lr=lr, rho=0.95, eps=1e-8)
+        elif optimizer_name == "Adam":
+            return torch.optim.Adam(self.parameters(), lr=lr)
+        elif optimizer_name == "RMSProp":
+            return torch.optim.RMSprop(self.parameters(), lr=lr)
+        elif optimizer_name == "GradientDescent":
+            return torch.optim.SGD(self.parameters(), lr=lr)
+        else:
+            raise ValueError(f"Unsupported optimizer: {optimizer_name}")
 
-		### Train optimizer
-		optimizer_name = self._model_params['optimizer']
-		if optimizer_name == 'Momentum':
-			optimizer_fn = lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9)
-		elif optimizer_name == 'AdaDelta':
-			optimizer_fn = lambda lr: tf.train.AdadeltaOptimizer(lr, rho=0.95, epsilon=1e-08)
-		elif optimizer_name == 'Adam':
-			optimizer_fn = tf.train.AdamOptimizer
-		elif optimizer_name == 'RMSProp':
-			optimizer_fn = tf.train.RMSPropOptimizer
-		elif optimizer_name == 'GradientDescent':
-			optimizer_fn = tf.train.GradientDescentOptimizer
-		else:
-			raise ValueError('Unsupported optimizer: %s' % optimizer_name)
+    def build_scheduler(self, optimizer):
+        if self._model_params.get("use_decay"):
+            return torch.optim.lr_scheduler.StepLR(
+                optimizer,
+                step_size=self._model_params["decay_steps"],
+                gamma=self._model_params["decay_rate"],
+            )
+        return None
 
-		### Learning rate decay
-		if 'use_decay' in self._model_params and self._model_params['use_decay'] == True:
-			learning_rate_decay_fn = lambda lr, global_step: tf.train.exponential_decay(
-				learning_rate=lr,
-				global_step=global_step,
-				decay_steps=self._model_params['decay_steps'],
-				decay_rate=self._model_params['decay_rate'],
-				staircase=True)
-		else:
-			learning_rate_decay_fn = None
+    def save(self, logdir, step=None):
+        os.makedirs(logdir, exist_ok=True)
+        step = step if step is not None else self.global_step
+        path = os.path.join(logdir, f"model-{step:06d}.pt")
+        torch.save({"step": step, "state_dict": self.state_dict()}, path)
 
-		learning_rate = self._model_params['learning_rate']
-		if learning_rate_decay_fn is not None:
-			learning_rate = learning_rate_decay_fn(learning_rate, self._global_step)
-		optimizer = optimizer_fn(learning_rate)
-		loss_scaled = loss * loss_factor
-		grads_and_vars = optimizer.compute_gradients(loss_scaled, var_list=trainable_variables)
+    def load(self, logdir):
+        checkpoints = sorted(glob.glob(os.path.join(logdir, "model-*.pt")))
+        if not checkpoints:
+            deco_print("WARNING: No checkpoint found. Using random initialization.")
+            return
+        path = checkpoints[-1]
+        data = torch.load(path, map_location="cpu")
+        self.load_state_dict(data["state_dict"])
+        self.global_step = data.get("step", 0)
+        deco_print(f"Restored checkpoint: {path}")
 
-		max_grad_norm = self._model_params.get('max_grad_norm')
-		if max_grad_norm is not None:
-			valid_grads_and_vars = [(grad, var) for grad, var in grads_and_vars if grad is not None]
-			if valid_grads_and_vars:
-				grads, variables = zip(*valid_grads_and_vars)
-				clipped_grads, _ = tf.clip_by_global_norm(grads, max_grad_norm)
-				clipped_lookup = dict(zip(variables, clipped_grads))
-				grads_and_vars = [(clipped_lookup.get(var), var) for grad, var in grads_and_vars if grad is not None]
+    @property
+    def model_params(self):
+        return self._model_params
 
-		return optimizer.apply_gradients(grads_and_vars, global_step=self._global_step)
-
-	@property
-	def model_params(self):
-		"""
-		Returns:
-			Parameters used to construct the model. 
-		"""
-		return self._model_params
-
-	def randomInitialization(self, sess):
-		sess.run(tf.global_variables_initializer())
-		deco_print('Random initialization')
-
-	def loadSavedModel(self, sess, logdir):
-		if tf.train.latest_checkpoint(logdir) is not None:
-			saver = tf.train.Saver(max_to_keep=100)
-			saver.restore(sess, tf.train.latest_checkpoint(logdir))
-			deco_print('Restored checkpoint')
-		else:
-			deco_print('WARNING: Checkpoint not found! Use random initialization! ')
-			self.randomInitialization(sess)
+    @property
+    def device(self):
+        try:
+            return next(self.parameters()).device
+        except StopIteration:
+            return torch.device("cpu")
