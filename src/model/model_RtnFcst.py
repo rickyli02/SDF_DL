@@ -3,15 +3,15 @@ import os
 import time
 import matplotlib.pyplot as plt
 import numpy as np
-import tensorflow as tf
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
-from tensorflow.python.layers.core import Dense
 from tensorflow.core.framework import summary_pb2
 
 from .model_base import ModelBase
 from .model_utils import getFactor
 from .model_utils import calculateStatistics
+from src.tf_compat import Dense
+from src.tf_compat import tf
 from src.utils import deco_print
 from src.utils import sharpe
 from src.utils import construct_long_short_portfolio

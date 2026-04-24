@@ -1,0 +1,10 @@
+.venv/
+.matplotlib/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+datasets/
+output/
+output_RF/
+*.zip
+Deep Learning in Asset Pricing Data/

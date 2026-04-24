@@ -2,15 +2,15 @@ import copy
 import os
 import time
 import numpy as np
-import tensorflow as tf
 from tensorflow.core.framework import summary_pb2
-from tensorflow.python.layers.core import Dense
-from tensorflow.python.ops.rnn_cell_impl import LSTMStateTuple
 
 from .model_base import ModelBase
 from .model_utils import create_rnn_cell
 from .model_utils import initial_state_size
 from .model_utils import calculateStatistics
+from src.tf_compat import Dense
+from src.tf_compat import LSTMStateTuple
+from src.tf_compat import tf
 from src.utils import deco_print
 from src.utils import sharpe
 

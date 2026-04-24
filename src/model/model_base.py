@@ -1,7 +1,7 @@
 import abc
 import six
-import tensorflow as tf
 
+from src.tf_compat import tf
 from src.utils import deco_print
 
 six.add_metaclass(abc.ABCMeta)
@@ -18,7 +18,7 @@ class ModelBase:
 		"""
 		self._model_params = model_params
 		self._mode = mode
-		self._global_step = global_step if global_step is not None else tf.contrib.framework.get_or_create_global_step()
+		self._global_step = global_step if global_step is not None else tf.train.get_or_create_global_step()
 
 	@abc.abstractmethod
 	def _build_forward_pass_graph(self):
@@ -46,12 +46,19 @@ class ModelBase:
 		deco_print('Number of parameters: %d' %total_params)
 
 		### Train optimizer
-		if self._model_params['optimizer'] == 'Momentum':
-			optimizer = lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9)
-		elif self._model_params['optimizer'] == 'AdaDelta':
-			optimizer = lambda lr: tf.train.AdadeltaOptimizer(lr, rho=0.95, epsilon=1e-08)
+		optimizer_name = self._model_params['optimizer']
+		if optimizer_name == 'Momentum':
+			optimizer_fn = lambda lr: tf.train.MomentumOptimizer(lr, momentum=0.9)
+		elif optimizer_name == 'AdaDelta':
+			optimizer_fn = lambda lr: tf.train.AdadeltaOptimizer(lr, rho=0.95, epsilon=1e-08)
+		elif optimizer_name == 'Adam':
+			optimizer_fn = tf.train.AdamOptimizer
+		elif optimizer_name == 'RMSProp':
+			optimizer_fn = tf.train.RMSPropOptimizer
+		elif optimizer_name == 'GradientDescent':
+			optimizer_fn = tf.train.GradientDescentOptimizer
 		else:
-			optimizer = self._model_params['optimizer']
+			raise ValueError('Unsupported optimizer: %s' % optimizer_name)
 
 		### Learning rate decay
 		if 'use_decay' in self._model_params and self._model_params['use_decay'] == True:
@@ -64,21 +71,23 @@ class ModelBase:
 		else:
 			learning_rate_decay_fn = None
 
-		return tf.contrib.layers.optimize_loss(
-			loss=loss * loss_factor,
-			global_step=self._global_step,
-			learning_rate=self._model_params['learning_rate'],
-			optimizer=optimizer,
-			gradient_noise_scale=None,
-			gradient_multipliers=None,
-			clip_gradients=self._model_params['max_grad_norm'] if 'max_grad_norm' in self._model_params else None,
-			learning_rate_decay_fn=learning_rate_decay_fn,
-			update_ops=None,
-			variables=trainable_variables,
-			name=None,
-			summaries=None,
-			colocate_gradients_with_ops=True,
-			increment_global_step=True)
+		learning_rate = self._model_params['learning_rate']
+		if learning_rate_decay_fn is not None:
+			learning_rate = learning_rate_decay_fn(learning_rate, self._global_step)
+		optimizer = optimizer_fn(learning_rate)
+		loss_scaled = loss * loss_factor
+		grads_and_vars = optimizer.compute_gradients(loss_scaled, var_list=trainable_variables)
+
+		max_grad_norm = self._model_params.get('max_grad_norm')
+		if max_grad_norm is not None:
+			valid_grads_and_vars = [(grad, var) for grad, var in grads_and_vars if grad is not None]
+			if valid_grads_and_vars:
+				grads, variables = zip(*valid_grads_and_vars)
+				clipped_grads, _ = tf.clip_by_global_norm(grads, max_grad_norm)
+				clipped_lookup = dict(zip(variables, clipped_grads))
+				grads_and_vars = [(clipped_lookup.get(var), var) for grad, var in grads_and_vars if grad is not None]
+
+		return optimizer.apply_gradients(grads_and_vars, global_step=self._global_step)
 
 	@property
 	def model_params(self):

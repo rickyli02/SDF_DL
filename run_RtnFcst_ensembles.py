@@ -1,10 +1,10 @@
 import os
 import json
 import numpy as np
-import tensorflow as tf
 
 from src.data import data_layer
 from src.model.model_RtnFcst import FeedForwardModelWithNA_Return
+from src.tf_compat import tf
 from src.utils import deco_print
 
 tf.flags.DEFINE_string('config', '', 'Path to the file with configurations')
@@ -18,9 +18,29 @@ tf.flags.DEFINE_integer('trial_id', 0, 'ID of trials')
 
 FLAGS = tf.flags.FLAGS
 
+
+def validate_config_paths(config):
+	required_paths = [
+		config['individual_feature_file'],
+		config['individual_feature_file_valid'],
+		config['individual_feature_file_test'],
+	]
+	required_paths.extend([
+		config['macro_feature_file'],
+		config['macro_feature_file_valid'],
+		config['macro_feature_file_test'],
+	])
+	missing = [path for path in required_paths if not os.path.exists(path)]
+	if missing:
+		raise FileNotFoundError(
+			'Missing dataset files:\n%s\n\nGenerate the RF datasets with create_RF_data.py after training the SDF model, and ensure the macro dataset files are present.'
+			% '\n'.join(missing)
+		)
+
 def main(_):
 	with open(FLAGS.config + '/config_RF_' + FLAGS.task_id + '.json', 'r') as file:
 		config = json.load(file)
+	validate_config_paths(config)
 	deco_print('Read the following in config: ')
 	print(json.dumps(config, indent=4))
 

@@ -1,10 +1,10 @@
 import numpy as np
-import tensorflow as tf
-from tensorflow.python.ops.rnn_cell import BasicRNNCell
-from tensorflow.python.ops.rnn_cell import GRUCell
-from tensorflow.python.ops.rnn_cell import LSTMCell
-from tensorflow.python.ops.rnn_cell import DropoutWrapper
-from tensorflow.python.ops.rnn_cell import MultiRNNCell
+
+from src.tf_compat import BasicRNNCell
+from src.tf_compat import DropoutWrapper
+from src.tf_compat import GRUCell
+from src.tf_compat import LSTMCell
+from src.tf_compat import MultiRNNCell
 
 def create_rnn_cell(cell_type, num_units, num_layers=1, dp_input_keep_prob=1.0, dp_output_keep_prob=1.0):
 	def single_cell(num_units):
