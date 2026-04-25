@@ -30,7 +30,7 @@ def Markowitz(r):
 
 
 def sharpe(r):
-    return np.mean(r / r.std())
+    return np.mean(r) / r.std()
 
 
 def load_sorted_results(path, by=None):
